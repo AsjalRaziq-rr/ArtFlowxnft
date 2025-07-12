@@ -54,10 +54,23 @@ class BlockchainService {
   private nftContract: ethers.Contract | null = null;
   private marketplaceContract: ethers.Contract | null = null;
 
-  // Contract addresses (replace with your deployed contracts)
-  private readonly NFT_CONTRACT_ADDRESS = '0x742d35Cc6634C0532925a3b8D1322b3c12c5a34A'; // Example address
-  private readonly MARKETPLACE_CONTRACT_ADDRESS = '0x8ba1f109551bD432803012645Hac136c9c1495'; // Example address
+  // Contract addresses for Polygon Mumbai testnet (replace with your deployed contracts)
+  private readonly NFT_CONTRACT_ADDRESS = '0xd2a5bC10698FD955D1Fe6cb468a17809A08fd005';
+  private readonly MARKETPLACE_CONTRACT_ADDRESS = '0xe2899bddFD890e320e643044c6b95B9B0b84157A';
   private readonly IPFS_GATEWAY = 'https://gateway.pinata.cloud/ipfs/';
+
+  // Polygon Mumbai testnet configuration
+  private readonly POLYGON_MUMBAI = {
+    chainId: '0x13881', // 80001 in hex
+    chainName: 'Polygon Mumbai Testnet',
+    nativeCurrency: {
+      name: 'MATIC',
+      symbol: 'MATIC',
+      decimals: 18,
+    },
+    rpcUrls: ['https://rpc.ankr.com/polygon_mumbai'],
+    blockExplorerUrls: ['https://mumbai.polygonscan.com'],
+  };
 
   constructor() {
     this.initializeProvider();
@@ -67,7 +80,6 @@ class BlockchainService {
     if (typeof window !== 'undefined' && (window as any).ethereum) {
       try {
         this.provider = new ethers.BrowserProvider((window as any).ethereum);
-        // Don't setup contracts immediately - wait for explicit wallet connection
       } catch (error) {
         console.error('Failed to initialize provider:', error);
       }
@@ -90,6 +102,7 @@ class BlockchainService {
       );
     } catch (error) {
       console.error('Failed to setup contracts:', error);
+      throw error;
     }
   }
 
@@ -99,17 +112,38 @@ class BlockchainService {
     }
 
     try {
+      // Request account access
       const accounts = await (window as any).ethereum.request({
         method: 'eth_requestAccounts',
       });
       
-      // Only setup signer and contracts after successful wallet connection
-      this.signer = await this.provider.getSigner();
-      await this.setupContracts();
+      // Initialize signer and contracts
+      await this.initializeSignerAndContracts();
+      
+      // Check if we're on the correct network
+      const network = await this.provider.getNetwork();
+      if (network.chainId !== 80001n) { // Mumbai testnet
+        await this.switchToPolygonMumbai();
+      }
       
       return accounts;
     } catch (error) {
       console.error('Failed to connect wallet:', error);
+      throw error;
+    }
+  }
+
+  async initializeSignerAndContracts(): Promise<void> {
+    if (!this.provider) {
+      throw new Error('Provider not initialized');
+    }
+
+    try {
+      // Setup signer and contracts
+      this.signer = await this.provider.getSigner();
+      await this.setupContracts();
+    } catch (error) {
+      console.error('Failed to initialize signer and contracts:', error);
       throw error;
     }
   }
@@ -130,11 +164,12 @@ class BlockchainService {
 
   async uploadToIPFS(metadata: NFTMetadata): Promise<string> {
     try {
-      // In production, use Pinata, IPFS, or another service
-      const response = await fetch('/api/upload-to-ipfs', {
+      // Use Pinata or another IPFS service
+      const response = await fetch('https://api.pinata.cloud/pinning/pinJSONToIPFS', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Authorization': `Bearer ${import.meta.env.VITE_PINATA_JWT}`,
         },
         body: JSON.stringify(metadata),
       });
@@ -143,13 +178,13 @@ class BlockchainService {
         throw new Error('Failed to upload to IPFS');
       }
 
-      const { ipfsHash } = await response.json();
-      return `${this.IPFS_GATEWAY}${ipfsHash}`;
+      const { IpfsHash } = await response.json();
+      return `${this.IPFS_GATEWAY}${IpfsHash}`;
     } catch (error) {
       console.error('IPFS upload failed:', error);
-      // Fallback: create a mock IPFS URL for demo
-      const mockHash = `Qm${Math.random().toString(36).substring(2, 15)}${Math.random().toString(36).substring(2, 15)}`;
-      return `${this.IPFS_GATEWAY}${mockHash}`;
+      // Fallback: create a data URL for demo
+      const dataUrl = `data:application/json;base64,${btoa(JSON.stringify(metadata))}`;
+      return dataUrl;
     }
   }
 
@@ -181,87 +216,205 @@ class BlockchainService {
   }
 
   async mintNFT(options: MintingOptions): Promise<{ tokenId: string; transactionHash: string }> {
-    // For demo purposes, simulate the minting process
+    if (!this.signer || !this.nftContract) {
+      throw new Error('Wallet not connected or contracts not initialized');
+    }
+
     try {
       toast.loading('Creating metadata...', { id: 'minting' });
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
+      
+      // Create metadata
+      const metadata = await this.createMetadata(options);
+      
       toast.loading('Uploading to IPFS...', { id: 'minting' });
-      await new Promise(resolve => setTimeout(resolve, 1500));
-
+      
+      // Upload metadata to IPFS
+      const tokenURI = await this.uploadToIPFS(metadata);
+      
       toast.loading('Minting NFT on blockchain...', { id: 'minting' });
-      await new Promise(resolve => setTimeout(resolve, 2000));
-
+      
+      // Get the user's address
+      const userAddress = await this.signer.getAddress();
+      
+      // Estimate gas for the transaction
+      const gasEstimate = await this.nftContract.mint.estimateGas(userAddress, tokenURI);
+      
+      // Add 20% buffer to gas estimate
+      const gasLimit = gasEstimate * 120n / 100n;
+      
+      // Mint the NFT
+      const transaction = await this.nftContract.mint(userAddress, tokenURI, {
+        gasLimit: gasLimit,
+      });
+      
       toast.loading('Waiting for confirmation...', { id: 'minting' });
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      // Generate mock transaction data
-      const tokenId = Math.floor(Math.random() * 10000).toString();
-      const transactionHash = `0x${Math.random().toString(16).substring(2, 66)}`;
+      
+      // Wait for transaction to be mined
+      const receipt = await transaction.wait();
+      
+      if (!receipt) {
+        throw new Error('Transaction failed');
+      }
+      
+      // Extract token ID from the Transfer event
+      let tokenId = '0';
+      if (receipt.logs && receipt.logs.length > 0) {
+        try {
+          const transferEvent = receipt.logs.find((log: any) => 
+            log.topics[0] === ethers.id('Transfer(address,address,uint256)')
+          );
+          if (transferEvent && transferEvent.topics[3]) {
+            tokenId = ethers.toBigInt(transferEvent.topics[3]).toString();
+          }
+        } catch (error) {
+          console.warn('Could not extract token ID from event:', error);
+          // Fallback: get total supply to estimate token ID
+          try {
+            const totalSupply = await this.nftContract.totalSupply();
+            tokenId = totalSupply.toString();
+          } catch (e) {
+            console.warn('Could not get total supply:', e);
+          }
+        }
+      }
 
       toast.success('NFT minted successfully!', { id: 'minting' });
 
       return {
         tokenId,
-        transactionHash,
+        transactionHash: receipt.hash,
       };
-    } catch (error) {
+    } catch (error: any) {
       console.error('Minting failed:', error);
-      toast.error('Minting failed. Please try again.', { id: 'minting' });
+      
+      let errorMessage = 'Minting failed. Please try again.';
+      
+      if (error.code === 'ACTION_REJECTED') {
+        errorMessage = 'Transaction was rejected by user.';
+      } else if (error.code === 'INSUFFICIENT_FUNDS') {
+        errorMessage = 'Insufficient funds for gas fees.';
+      } else if (error.message?.includes('gas')) {
+        errorMessage = 'Transaction failed due to gas issues. Please try again.';
+      } else if (error.message?.includes('network')) {
+        errorMessage = 'Network error. Please check your connection.';
+      }
+      
+      toast.error(errorMessage, { id: 'minting' });
       throw error;
     }
   }
 
   async listForSale(tokenId: string, price: string): Promise<string> {
+    if (!this.signer || !this.nftContract || !this.marketplaceContract) {
+      throw new Error('Wallet not connected or contracts not initialized');
+    }
+
     try {
+      toast.loading('Approving NFT for marketplace...', { id: 'listing' });
+      
+      // First approve the marketplace to transfer the NFT
+      const approveTransaction = await this.nftContract.approve(
+        this.MARKETPLACE_CONTRACT_ADDRESS,
+        tokenId
+      );
+      await approveTransaction.wait();
+      
       toast.loading('Listing NFT for sale...', { id: 'listing' });
       
-      // Simulate listing process
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // Convert price to wei
+      const priceInWei = ethers.parseEther(price);
       
-      const transactionHash = `0x${Math.random().toString(16).substring(2, 66)}`;
+      // List the NFT on the marketplace
+      const listTransaction = await this.marketplaceContract.listItem(
+        this.NFT_CONTRACT_ADDRESS,
+        tokenId,
+        priceInWei
+      );
+      
+      const receipt = await listTransaction.wait();
+      
+      if (!receipt) {
+        throw new Error('Listing transaction failed');
+      }
       
       toast.success('NFT listed for sale!', { id: 'listing' });
-      return transactionHash;
-    } catch (error) {
+      return receipt.hash;
+    } catch (error: any) {
       console.error('Listing failed:', error);
-      toast.error('Failed to list NFT for sale.', { id: 'listing' });
+      
+      let errorMessage = 'Failed to list NFT for sale.';
+      
+      if (error.code === 'ACTION_REJECTED') {
+        errorMessage = 'Transaction was rejected by user.';
+      } else if (error.code === 'INSUFFICIENT_FUNDS') {
+        errorMessage = 'Insufficient funds for gas fees.';
+      }
+      
+      toast.error(errorMessage, { id: 'listing' });
       throw error;
     }
   }
 
   async buyNFT(tokenId: string, price: string): Promise<string> {
+    if (!this.signer || !this.marketplaceContract) {
+      throw new Error('Wallet not connected or contracts not initialized');
+    }
+
     try {
       toast.loading('Purchasing NFT...', { id: 'buying' });
       
-      // Simulate purchase process
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // Convert price to wei
+      const priceInWei = ethers.parseEther(price);
       
-      const transactionHash = `0x${Math.random().toString(16).substring(2, 66)}`;
+      // Buy the NFT
+      const transaction = await this.marketplaceContract.buyItem(
+        this.NFT_CONTRACT_ADDRESS,
+        tokenId,
+        { value: priceInWei }
+      );
+      
+      const receipt = await transaction.wait();
+      
+      if (!receipt) {
+        throw new Error('Purchase transaction failed');
+      }
       
       toast.success('NFT purchased successfully!', { id: 'buying' });
-      return transactionHash;
-    } catch (error) {
+      return receipt.hash;
+    } catch (error: any) {
       console.error('Purchase failed:', error);
-      toast.error('Failed to purchase NFT.', { id: 'buying' });
+      
+      let errorMessage = 'Failed to purchase NFT.';
+      
+      if (error.code === 'ACTION_REJECTED') {
+        errorMessage = 'Transaction was rejected by user.';
+      } else if (error.code === 'INSUFFICIENT_FUNDS') {
+        errorMessage = 'Insufficient funds to purchase NFT.';
+      }
+      
+      toast.error(errorMessage, { id: 'buying' });
       throw error;
     }
   }
 
   async getNFTMetadata(tokenId: string): Promise<NFTMetadata | null> {
+    if (!this.nftContract) {
+      return null;
+    }
+
     try {
-      // Simulate metadata retrieval
-      await new Promise(resolve => setTimeout(resolve, 500));
+      const tokenURI = await this.nftContract.tokenURI(tokenId);
       
-      return {
-        name: `NFT #${tokenId}`,
-        description: 'A unique AI-generated NFT',
-        image: 'https://images.pexels.com/photos/1103970/pexels-photo-1103970.jpeg',
-        attributes: [
-          { trait_type: 'Type', value: 'AI Generated' },
-          { trait_type: 'Rarity', value: 'Unique' },
-        ],
-      };
+      if (tokenURI.startsWith('data:')) {
+        // Handle data URLs
+        const base64Data = tokenURI.split(',')[1];
+        const jsonString = atob(base64Data);
+        return JSON.parse(jsonString);
+      } else {
+        // Handle IPFS URLs
+        const response = await fetch(tokenURI);
+        return await response.json();
+      }
     } catch (error) {
       console.error('Failed to get NFT metadata:', error);
       return null;
@@ -269,10 +422,12 @@ class BlockchainService {
   }
 
   async getNFTOwner(tokenId: string): Promise<string> {
+    if (!this.nftContract) {
+      throw new Error('Contract not initialized');
+    }
+
     try {
-      // Simulate owner retrieval
-      await new Promise(resolve => setTimeout(resolve, 500));
-      return '0x742d35Cc6634C0532925a3b8D1322b3c12c5a34A';
+      return await this.nftContract.ownerOf(tokenId);
     } catch (error) {
       console.error('Failed to get NFT owner:', error);
       throw error;
@@ -280,10 +435,30 @@ class BlockchainService {
   }
 
   async getUserNFTs(address: string): Promise<string[]> {
+    if (!this.nftContract) {
+      return [];
+    }
+
     try {
-      // Simulate user NFTs retrieval
-      await new Promise(resolve => setTimeout(resolve, 500));
-      return ['1', '2', '3', '4', '5'];
+      const balance = await this.nftContract.balanceOf(address);
+      const tokenIds: string[] = [];
+      
+      // This is a simplified approach - in production, you'd use events or indexing
+      const totalSupply = await this.nftContract.totalSupply();
+      
+      for (let i = 1; i <= Number(totalSupply); i++) {
+        try {
+          const owner = await this.nftContract.ownerOf(i);
+          if (owner.toLowerCase() === address.toLowerCase()) {
+            tokenIds.push(i.toString());
+          }
+        } catch (error) {
+          // Token might not exist or be burned
+          continue;
+        }
+      }
+      
+      return tokenIds;
     } catch (error) {
       console.error('Failed to get user NFTs:', error);
       return [];
@@ -292,6 +467,33 @@ class BlockchainService {
 
   isWeb3Available(): boolean {
     return typeof window !== 'undefined' && !!(window as any).ethereum;
+  }
+
+  async switchToPolygonMumbai(): Promise<void> {
+    if (!this.provider) {
+      throw new Error('Provider not initialized');
+    }
+
+    try {
+      await (window as any).ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: this.POLYGON_MUMBAI.chainId }],
+      });
+    } catch (switchError: any) {
+      // This error code indicates that the chain has not been added to MetaMask
+      if (switchError.code === 4902) {
+        try {
+          await (window as any).ethereum.request({
+            method: 'wallet_addEthereumChain',
+            params: [this.POLYGON_MUMBAI],
+          });
+        } catch (addError) {
+          throw addError;
+        }
+      } else {
+        throw switchError;
+      }
+    }
   }
 
   async switchToPolygon(): Promise<void> {
@@ -305,7 +507,6 @@ class BlockchainService {
         params: [{ chainId: '0x89' }], // Polygon Mainnet
       });
     } catch (switchError: any) {
-      // This error code indicates that the chain has not been added to MetaMask
       if (switchError.code === 4902) {
         try {
           await (window as any).ethereum.request({
