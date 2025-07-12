@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Upload, Loader2, CheckCircle2, AlertCircle, ExternalLink } from 'lucide-react';
+import { useWallet } from '../context/WalletContext';
 import { blockchainService } from '../services/blockchainService';
 import { ipfsService } from '../services/ipfsService';
 import toast from 'react-hot-toast';
@@ -13,6 +14,7 @@ interface MintingModalProps {
 }
 
 const MintingModal: React.FC<MintingModalProps> = ({ isOpen, onClose, content, type }) => {
+  const { isConnected } = useWallet();
   const [step, setStep] = useState(1);
   const [formData, setFormData] = useState({
     title: '',
@@ -25,8 +27,19 @@ const MintingModal: React.FC<MintingModalProps> = ({ isOpen, onClose, content, t
   const [mintResult, setMintResult] = useState<{ tokenId: string; transactionHash: string } | null>(null);
 
   const handleMint = async () => {
+    // Check if wallet is connected first
+    if (!isConnected) {
+      toast.error('Please connect your wallet first');
+      return;
+    }
+
     if (!formData.title.trim()) {
       toast.error('Please enter a title for your NFT');
+      return;
+    }
+
+    if (!blockchainService.isWeb3Available()) {
+      toast.error('Please install MetaMask or another Web3 wallet');
       return;
     }
 
@@ -34,14 +47,6 @@ const MintingModal: React.FC<MintingModalProps> = ({ isOpen, onClose, content, t
     setStep(2);
     
     try {
-      // Upload image to IPFS if it's a generated image
-      let imageUrl = content.url;
-      if (type === 'image' && content.url) {
-        toast.loading('Uploading image to IPFS...', { id: 'minting' });
-        const ipfsHash = await ipfsService.uploadImageFromURL(content.url);
-        imageUrl = ipfsService.getIPFSUrl(ipfsHash);
-      }
-
       // Mint the NFT
       const result = await blockchainService.mintNFT({
         title: formData.title,
@@ -49,7 +54,7 @@ const MintingModal: React.FC<MintingModalProps> = ({ isOpen, onClose, content, t
         price: formData.price,
         royalty: parseInt(formData.royalty),
         collection: formData.collection,
-        image: imageUrl,
+        image: content.url,
         attributes: [
           {
             trait_type: 'Type',
@@ -62,6 +67,10 @@ const MintingModal: React.FC<MintingModalProps> = ({ isOpen, onClose, content, t
           {
             trait_type: 'Original Prompt',
             value: content.prompt || 'N/A',
+          },
+          {
+            trait_type: 'Generated At',
+            value: new Date().toISOString(),
           },
         ],
       });
@@ -80,6 +89,11 @@ const MintingModal: React.FC<MintingModalProps> = ({ isOpen, onClose, content, t
       console.error('Minting failed:', error);
       setStep(1);
       setIsMinting(false);
+      
+      // Don't show additional error toast if blockchain service already showed one
+      if (!(error as any)?.code) {
+        toast.error('Minting failed. Please try again.');
+      }
     }
   };
 
@@ -103,8 +117,8 @@ const MintingModal: React.FC<MintingModalProps> = ({ isOpen, onClose, content, t
 
   const viewOnBlockchain = () => {
     if (mintResult) {
-      // Open blockchain explorer (example for Polygon)
-      window.open(`https://polygonscan.com/tx/${mintResult.transactionHash}`, '_blank');
+      // Open blockchain explorer (Mumbai testnet for development)
+      window.open(`https://mumbai.polygonscan.com/tx/${mintResult.transactionHash}`, '_blank');
     }
   };
 
@@ -266,12 +280,12 @@ const MintingModal: React.FC<MintingModalProps> = ({ isOpen, onClose, content, t
                 {/* Mint Button */}
                 <motion.button
                   onClick={handleMint}
-                  disabled={!formData.title || isMinting}
+                  disabled={!formData.title || isMinting || !isConnected}
                   className="w-full py-3 bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-lg font-medium hover:from-indigo-600 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
                 >
-                  Mint NFT
+                  {!isConnected ? 'Connect Wallet First' : 'Mint NFT'}
                 </motion.button>
               </div>
             )}
