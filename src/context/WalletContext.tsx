@@ -46,6 +46,14 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           setIsConnected(true);
           await updateBalance(accounts[0]);
           await updateChainId();
+          
+          // Initialize blockchain service contracts for existing connection
+          try {
+            await blockchainService.initializeSignerAndContracts();
+          } catch (error) {
+            console.error('Failed to initialize blockchain service:', error);
+            // Don't fail the connection check, but log the error
+          }
         }
       } catch (error) {
         console.error('Failed to check wallet connection:', error);
@@ -119,13 +127,13 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         
         toast.success('Wallet connected successfully!', { id: 'wallet-connect' });
         
-        // Check if we're on the correct network (Polygon)
+        // Check if we're on the correct network (Polygon Mumbai for development)
         const currentChainId = await (window as any).ethereum.request({
           method: 'eth_chainId',
         });
         
-        if (parseInt(currentChainId, 16) !== 137) { // Polygon Mainnet
-          toast.error('Please switch to Polygon network', { id: 'network-error' });
+        if (parseInt(currentChainId, 16) !== 80001) { // Polygon Mumbai testnet
+          toast.error('Please switch to Polygon Mumbai testnet for development', { id: 'network-error' });
         }
       }
     } catch (error: any) {
@@ -133,6 +141,8 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       
       if (error.code === 4001) {
         toast.error('Connection rejected by user', { id: 'wallet-connect' });
+      } else if (error.code === -32002) {
+        toast.error('Wallet request already pending. Please check your wallet.', { id: 'wallet-connect' });
       } else {
         toast.error('Failed to connect wallet', { id: 'wallet-connect' });
       }
@@ -149,9 +159,9 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const switchNetwork = useCallback(async () => {
     try {
-      toast.loading('Switching to Polygon network...', { id: 'network-switch' });
-      await blockchainService.switchToPolygon();
-      toast.success('Switched to Polygon network!', { id: 'network-switch' });
+      toast.loading('Switching to Polygon Mumbai testnet...', { id: 'network-switch' });
+      await blockchainService.switchToPolygonMumbai();
+      toast.success('Switched to Polygon Mumbai testnet!', { id: 'network-switch' });
     } catch (error) {
       console.error('Failed to switch network:', error);
       toast.error('Failed to switch network', { id: 'network-switch' });
